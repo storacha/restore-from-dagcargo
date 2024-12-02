@@ -41,7 +41,7 @@ export const findAggregate = async (spinner, db, root) => {
   return res.rows[0].key
 }
 
-const downloadURL = key =>
+export const downloadURL = key =>
   new URL(`https://roundabout.web3.storage/key/${key}?bucket=dagcargo`)
 
 /**
