@@ -9,7 +9,7 @@ import * as w3up from '@web3-storage/w3up-client'
 import { StoreMemory } from '@web3-storage/w3up-client/stores/memory'
 import * as Proof from '@web3-storage/w3up-client/proof'
 import { Signer } from '@web3-storage/w3up-client/principal/ed25519'
-import { findAggregate, downloadURL, downloadAggregate, indexCAR, extractDAG, storeDAG } from './lib.js'
+import { findAggregate, downloadURL, downloadBlob, indexCAR, extractDAG, storeDAG } from './lib.js'
 
 dotenv.config()
 
@@ -39,7 +39,7 @@ const main = async () => {
 
   const aggDestPath = path.join(dataPath, key)
   if (!fs.existsSync(aggDestPath)) {
-    await downloadAggregate(spinner, srcURL, aggDestPath)
+    await downloadBlob(spinner, srcURL, aggDestPath)
   }
 
   const indexDestPath = `${aggDestPath}.idx`

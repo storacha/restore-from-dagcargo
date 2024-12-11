@@ -9,6 +9,7 @@ import { base58btc } from 'multiformats/bases/base58'
 import * as Block from 'multiformats/block'
 import { CARReaderStream, CARWriterStream } from 'carstream'
 import { ShardedDAGIndex } from '@storacha/blob-index'
+import { format as formatBytes } from 'bytes'
 import { Decoders, Hashers } from './defaults.js'
 
 /**
@@ -20,8 +21,8 @@ import { Decoders, Hashers } from './defaults.js'
 /** @param {UnknownLink} root */
 const dagcargoQuery = (root) => `
   SELECT DISTINCT metadata->>'md5hex' || '_' || piece_cid || '.car' AS key
-    FROM aggregate_entries
-    JOIN aggregates USING (aggregate_cid)
+    FROM cargo.aggregate_entries
+    JOIN cargo.aggregates USING (aggregate_cid)
    WHERE cid_v1 IN ('${root}')`
 
 /**
@@ -49,28 +50,36 @@ export const downloadURL = key =>
  * @param {URL} srcURL 
  * @param {string} destPath
  */
-export const downloadAggregate = async (spinner, srcURL, destPath) => {
-  spinner.start(`downloading aggregate from ${srcURL}`)
+export const downloadBlob = async (spinner, srcURL, destPath) => {
+  spinner.start(`downloading blob from ${srcURL}`)
   const res = await fetch(srcURL)
   if (!res.ok) {
     spinner.fail()
-    throw new Error(`failed to download aggregate: ${res.status}`, { cause: await res.text() })
+    throw new Error(`failed to download blob: ${res.status}`, { cause: await res.text() })
   }
   let bytes = 0
   let total = parseInt(res.headers.get('Content-Length'))
   const update = () => {
-    spinner.text = `downloading aggregate from ${srcURL} (${bytes.toLocaleString()} of ${total.toLocaleString()})`
+    spinner.text = `downloading blob from ${srcURL} (${formatBytes(bytes)} of ${formatBytes(total)})`
   }
   const intervalID = setInterval(update, 5000)
 
-  await res.body
-    .pipeThrough(new TransformStream({
-      transform (chunk, controller) {
-        bytes += chunk.length
-        controller.enqueue(chunk)
-      }
-    }))
-    .pipeTo(Writable.toWeb(fs.createWriteStream(destPath)))
+  const tmpPath = destPath + '.tmp'
+  try {
+    await res.body
+      .pipeThrough(new TransformStream({
+        transform (chunk, controller) {
+          bytes += chunk.length
+          controller.enqueue(chunk)
+        }
+      }))
+      .pipeTo(Writable.toWeb(fs.createWriteStream(tmpPath)))
+  } catch (err) {
+    // cleanup on error
+    if (bytes > 0) await fs.promises.rm(tmpPath)
+    throw err
+  }
+  await fs.promises.rename(tmpPath, destPath)
 
   clearInterval(intervalID)
   update()
@@ -80,18 +89,27 @@ export const downloadAggregate = async (spinner, srcURL, destPath) => {
 /**
  * @param {Ora} spinner 
  * @param {string} srcPath
- * @param {string} destPath
  */
-export const indexCAR = async (spinner, srcPath, destPath) => {
+export const hashFile = async (spinner, srcPath) => {
   spinner.start(`hashing ${path.basename(srcPath)}`)
   const hash = crypto.createHash('sha256')
   await Readable.toWeb(fs.createReadStream(srcPath))
     .pipeTo(new WritableStream({ write (chunk) { hash.update(chunk) } }))
 
-  const shard = Digest.create(sha256.code, hash.digest())
-  spinner.succeed(`hashed ${path.basename(srcPath)} => ${base58btc.encode(shard.bytes)}`)
+  const digest = Digest.create(sha256.code, hash.digest())
+  spinner.succeed(`hashed ${path.basename(srcPath)} => ${base58btc.encode(digest.bytes)}`)
+  return digest
+}
 
-  const index = ShardedDAGIndex.create(Link.parse('bafkqaaa'))
+/**
+ * @param {Ora} spinner 
+ * @param {string} srcPath
+ * @param {string} destPath
+ * @param {UnknownLink} content
+ */
+export const indexCAR = async (spinner, srcPath, destPath, content = Link.parse('bafkqaaa')) => {
+  const shard = await hashFile(spinner, srcPath)
+  const index = ShardedDAGIndex.create(content)
   spinner.start(`indexing ${path.basename(srcPath)}`)
   let blocks = 0
   await Readable.toWeb(fs.createReadStream(srcPath))
@@ -182,11 +200,14 @@ export const storeDAG = async (spinner, storage, srcPath) => {
   // const bytes = await fs.promises.readFile(srcPath)
   // const shard = await storage.capability.store.add(bytes)
   // await storage.capability.upload.add(root, [shard])
-  await storage.uploadCAR({ stream: () => Readable.toWeb(fs.createReadStream(srcPath)) }, {
+  const shards = []
+  const root = await storage.uploadCAR({ stream: () => Readable.toWeb(fs.createReadStream(srcPath)) }, {
     onShardStored ({ cid }) {
       msg += `\n  ${cid}`
       spinner.text = msg
+      shards.push(cid)
     }
   })
   spinner.succeed()
+  return { root, shards }
 }
